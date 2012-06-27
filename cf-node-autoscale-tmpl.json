@@ -1,0 +1,311 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+
+  "Description": "Node.js AutoScale Template. **WARNING** This template creates an Amazon EC2 instance. You will be billed for the AWS resources used if you create a stack from this template.",
+
+  "Parameters": {
+    "AppServerInstanceType": {
+      "Description": "Application server instance type",
+      "Type": "String",
+      "Default": "t1.micro",
+      "AllowedValues": ["t1.micro", "m1.small", "m1.medium", "m1.large", "m1.xlarge", "m2.xlarge", "m2.2xlarge", "m2.4xlarge", "c1.medium", "c1.xlarge"],
+      "ConstraintDescription": "must be a valid EC2 instance type."
+    },
+
+    "RootDeviceType": {
+      "Description": "EC2 root device type ('ebs' or 'instanceStore')",
+      "Type": "String",
+      "Default": "ebs",
+      "AllowedValues": ["ebs", "instanceStore"],
+      "ConstraintDescription": "must be 'ebs' or 'instanceStore."
+    },
+
+    "KeyName": {
+      "Description": "Name of an existing EC2 KeyPair to enable SSH access to the application server.",
+      "Type": "String"
+    },
+
+    "AppServerPort": {
+      "Description": "TCP/IP port of the application server.",
+      "Type": "Number",
+      "Default": 3000,
+      "MinValue": 1025,
+      "ConstraintDescription": "must be number and greater than well-known port number (> 1024)."
+    },
+
+    "AppURL": {
+      "Description": "Application Archive URL",
+      "Type": "String",
+      "MinLength": "1",
+      "ConstraintDescription": " is required."
+    }
+  },
+
+  "Mappings": {
+
+    "AWSRegionArch2AMI": {
+      "us-east-1": {
+        "ebs": "ami-e565ba8c",
+        "instanceStore": "ami-f565ba9c"
+      },
+      "us-west-2": {
+        "ebs": "ami-3ac64a0a",
+        "instanceStore": "ami-30c64a00"
+      },
+      "us-west-1": {
+        "ebs": "ami-e78cd4a2",
+        "instanceStore": "ami-d98cd49c"
+      },
+      "eu-west-1": {
+        "ebs": "ami-f9231b8d",
+        "instanceStore": "ami-ff231b8b"
+      },
+      "ap-southeast-1": {
+        "ebs": "ami-be3374ec",
+        "instanceStore": "ami-b23374e0"
+      },
+      "ap-northeast-1": {
+        "ebs": "ami-b851e2b9",
+        "instanceStore": "ami-047bca05"
+      },
+      "sa-east-1": {
+        "ebs": "ami-a6855bbb",
+        "instanceStore": "ami-ae855bb3"
+      }
+    }
+  },
+
+  "Resources": {
+    "CfnUser": {
+      "Type": "AWS::IAM::User",
+      "Properties": {
+        "Path": "/",
+        "Policies": [
+          {
+            "PolicyName": "root",
+            "PolicyDocument": {
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": "cloudformation:DescribeStackResource",
+                  "Resource": "*"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+
+    "HostKeys": {
+      "Type": "AWS::IAM::AccessKey",
+      "Properties": {
+        "UserName": {
+          "Ref": "CfnUser"
+        }
+      }
+    },
+
+    "WaitHandle": {
+      "Type": "AWS::CloudFormation::WaitConditionHandle"
+    },
+
+    "AppServerLaunchConfig": {
+      "Type" : "AWS::AutoScaling::LaunchConfiguration",
+      "Metadata": {
+        "AWS::CloudFormation::Init": {
+          "config": {
+            "packages": {
+              "rpm" : {
+                "nodejs" : "http://nodejs.tchol.org/repocfg/amzn1/nodejs-stable-release.noarch.rpm"
+              },
+              "yum": {
+                "gcc-c++": [],
+                "make": [],
+                "git" : [],
+                "nodejs-compat-symlinks": [],
+                "npm": []
+              }
+            },
+
+            "sources" : {
+              "/var/opt/app" : { "Ref": "AppURL" }
+            }
+          }
+        }
+      },
+      "Properties": {
+        "ImageId": { "Fn::FindInMap": [ "AWSRegionArch2AMI", { "Ref": "AWS::Region" }, { "Ref": "RootDeviceType" } ] },
+        "InstanceType": { "Ref": "AppServerInstanceType" },
+        "SecurityGroups": [ { "Ref": "AppServerSecurityGroup" } ],
+        "KeyName": { "Ref": "KeyName" },
+        "UserData": {
+          "Fn::Base64": {
+            "Fn::Base64": {
+              "Fn::Join": ["", [
+                "#!/bin/bash -v\n",
+                "yum update -y aws-cfn-bootstrap\n",
+
+                "# Helper function\n",
+                "function error_exit\n",
+                "{\n",
+                "  /opt/aws/bin/cfn-signal -e 1 -r \"$1\" '", { "Ref": "WaitHandle" }, "'\n",
+                "  exit 1\n",
+                "}\n",
+
+                "# Install packages\n",
+                "/opt/aws/bin/cfn-init -s ", { "Ref": "AWS::StackName" }, " -r AppServerLaunchConfig ",
+                "    --access-key ", { "Ref": "HostKeys" },
+                "    --secret-key ", { "Fn::GetAtt": ["HostKeys", "SecretAccessKey"] },
+                "    --region ", { "Ref": "AWS::Region" }, " || error_exit 'Failed to run cfn-init'\n",
+
+                "ulimit -n 65535\n",
+
+                "# Start application\n",
+                "cd /var/opt/app\n",
+                "npm config set HOST_NAME `curl http://169.254.169.254/latest/meta-data/public-hostname`", "\n",
+                "npm config set PORT ", { "Ref": "AppServerPort" }, "\n",
+                "npm install --production\n",
+                "NODE_ENV=production npm start > app.log 2>&1 &\n",
+
+                "# All is well so signal success\n",
+                "/opt/aws/bin/cfn-signal -e 0 -r \"AppServer setup complete\" '", { "Ref": "WaitHandle" }, "'\n"
+              ]]
+            }
+          }
+        }
+      }
+    },
+
+    "AppServerGroup" : {
+      "Type" : "AWS::AutoScaling::AutoScalingGroup",
+       "Properties" : {
+         "AvailabilityZones" : { "Fn::GetAZs" : "" },
+         "LaunchConfigurationName" : { "Ref" : "AppServerLaunchConfig" },
+         "MinSize" : "2",
+         "MaxSize" : "100",
+         "LoadBalancerNames" : [ { "Ref" : "AppServerElasticLoadBalancer" } ],
+         "Tags" : [
+           {
+             "Key" : "Name",
+             "Value" : { "Fn::Join" : [ "", [ { "Ref": "AWS::StackName" }, "::AppServer" ]] },
+             "PropagateAtLaunch" : "true"
+           }
+         ]
+       }
+     },
+
+    "AppServerScaleUpPolicy" : {
+      "Type" : "AWS::AutoScaling::ScalingPolicy",
+      "Properties" : {
+        "AdjustmentType" : "ChangeInCapacity",
+        "AutoScalingGroupName" : { "Ref" : "AppServerGroup" },
+        "Cooldown" : "60",
+        "ScalingAdjustment" : "2"
+      }
+    },
+
+    "AppServerScaleDownPolicy" : {
+      "Type" : "AWS::AutoScaling::ScalingPolicy",
+      "Properties" : {
+        "AdjustmentType" : "ChangeInCapacity",
+        "AutoScalingGroupName" : { "Ref" : "AppServerGroup" },
+        "Cooldown" : "60",
+        "ScalingAdjustment" : "-2"
+      }
+    },
+
+    "CPUAlarmHigh": {
+     "Type": "AWS::CloudWatch::Alarm",
+     "Properties": {
+        "AlarmDescription": "Scale-up if CPU > 90% for 10 minutes",
+        "MetricName": "CPUUtilization",
+        "Namespace": "AWS/EC2",
+        "Statistic": "Average",
+        "Period": "60",
+        "EvaluationPeriods": "2",
+        "Threshold": "90",
+        "AlarmActions": [ { "Ref": "AppServerScaleUpPolicy" } ],
+        "Dimensions": [
+          {
+            "Name": "AutoScalingGroupName",
+            "Value": { "Ref": "AppServerGroup" }
+          }
+        ],
+        "ComparisonOperator": "GreaterThanThreshold"
+      }
+    },
+
+    "CPUAlarmLow": {
+     "Type": "AWS::CloudWatch::Alarm",
+     "Properties": {
+        "AlarmDescription": "Scale-down if CPU < 70% for 10 minutes",
+        "MetricName": "CPUUtilization",
+        "Namespace": "AWS/EC2",
+        "Statistic": "Average",
+        "Period": "60",
+        "EvaluationPeriods": "2",
+        "Threshold": "50",
+        "AlarmActions": [ { "Ref": "AppServerScaleDownPolicy" } ],
+        "Dimensions": [
+          {
+            "Name": "AutoScalingGroupName",
+            "Value": { "Ref": "AppServerGroup" }
+          }
+        ],
+        "ComparisonOperator": "LessThanThreshold"
+      }
+    },
+
+    "AppServerElasticLoadBalancer" : {
+      "Type" : "AWS::ElasticLoadBalancing::LoadBalancer",
+      "Properties" : {
+        "AvailabilityZones" : { "Fn::GetAZs" : "" },
+        "Listeners" : [
+          {
+            "LoadBalancerPort" : "80",
+            "InstancePort" : { "Ref" : "AppServerPort" },
+            "Protocol" : "HTTP"
+          }
+        ],
+        "HealthCheck" : {
+          "Target" : { "Fn::Join" : [ "", ["HTTP:", { "Ref" : "AppServerPort" }, "/"]]},
+          "HealthyThreshold" : "3",
+          "UnhealthyThreshold" : "5",
+          "Interval" : "30",
+          "Timeout" : "5"
+        }
+      }
+    },
+
+    "AppServerSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupDescription": "Enable HTTP access",
+        "SecurityGroupIngress": [
+          {
+            "IpProtocol": "tcp",
+            "FromPort": 22,
+            "ToPort": 22,
+            "CidrIp": "0.0.0.0/0"
+          },
+          {
+            "IpProtocol": "tcp",
+            "FromPort": { "Ref": "AppServerPort" },
+            "ToPort": { "Ref": "AppServerPort" },
+            "SourceSecurityGroupOwnerId" : {"Fn::GetAtt" : ["AppServerElasticLoadBalancer", "SourceSecurityGroup.OwnerAlias"]},
+            "SourceSecurityGroupName" : {"Fn::GetAtt" : ["AppServerElasticLoadBalancer", "SourceSecurityGroup.GroupName"]}
+          }
+        ]
+      }
+    }
+
+  },
+
+  "Outputs": {
+    "AppServerURL" : {
+      "Description" : "URL of the website",
+      "Value" :  { "Fn::Join" : [ "", [ "http://", { "Fn::GetAtt" : [ "AppServerElasticLoadBalancer", "DNSName" ]}]]}
+    }
+  }
+}
