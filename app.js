@@ -1,9 +1,8 @@
-var http = require('http');
+var WebSocketServer = require('ws').Server
+  , wss = new WebSocketServer({ port: 3000 });
 
-var server = http.createServer(function (req, res) {
-  res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('hello');
-});
-server.listen(3000, function () {
-  console.log('Server is running on port %d', server.address().port);
+wss.on('connection', function (ws) {
+  ws.on('message', function (message) {
+    ws.send(message);
+  });
 });

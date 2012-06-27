@@ -2,6 +2,9 @@
   "name": "tng6_sample",
   "version": "0.1.0",
   "private": true,
+  "dependencies": {
+    "ws": "*" 
+  },
   "scripts": {
     "start": "node app.js"
   }
