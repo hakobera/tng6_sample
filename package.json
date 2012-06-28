@@ -4,5 +4,8 @@
   "private": true,
   "scripts": {
     "start": "node app.js"
+  },
+  "config": {
+    "PORT": 3000
   }
 }
